@@ -14,6 +14,9 @@
 package app
 
 import (
+	"os"
+	"path/filepath"
+
 	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/dockerclient"
 	"github.com/aws/amazon-ecs-agent/agent/ecs_client/model/ecs"
@@ -61,6 +64,7 @@ const (
 	capabilityEFS                               = "efs"
 	capabilityEFSAuth                           = "efsAuth"
 	capabilityEnvFilesS3                        = "env-files.s3"
+	capabilityEcsExec                           = "ecs-exec"
 )
 
 var nameOnlyAttributes = []string{
@@ -131,6 +135,7 @@ var nameOnlyAttributes = []string{
 //    ecs.capability.gmsa
 //    ecs.capability.efsAuth
 //    ecs.capability.env-files.s3
+//    ecs.capability.ecs-exec
 func (agent *ecsAgent) capabilities() ([]*ecs.Attribute, error) {
 	var capabilities []*ecs.Attribute
 
@@ -214,6 +219,9 @@ func (agent *ecsAgent) capabilities() ([]*ecs.Attribute, error) {
 	for _, cap := range agent.cfg.VolumePluginCapabilities {
 		capabilities = agent.appendEFSVolumePluginCapabilities(capabilities, cap)
 	}
+
+	// add ecs-exec capabilities if applicable
+	capabilities = agent.appendEcsExecCapabilities(capabilities)
 
 	return capabilities, nil
 }
@@ -316,6 +324,82 @@ func (agent *ecsAgent) appendTaskENICapabilities(capabilities []*ecs.Attribute) 
 	return capabilities
 }
 
+func (agent *ecsAgent) appendEcsExecCapabilities(capabilities []*ecs.Attribute) []*ecs.Attribute {
+	const capabilitiesRootDir = "/capabilities"
+	capabilityEcsExecRootDir := filepath.Join(capabilitiesRootDir, capabilityEcsExec)
+
+	const capabilityEcsExecBinPath = "bin"
+	capabilityEcsExecBinDir := filepath.Join(capabilityEcsExecRootDir, capabilityEcsExecBinPath)
+	const ssmAgentBinaryName = "amazon-ssm-agent"
+	if exists, err := fileExists(filepath.Join(capabilityEcsExecBinDir, ssmAgentBinaryName)); err != nil {
+		// unexpected, should return err and fail
+		return capabilities
+	} else if !exists {
+		return capabilities
+	}
+	const ssmSessionWorkerBinaryName = "ssm-session-worker"
+	if exists, err := fileExists(filepath.Join(capabilityEcsExecBinDir, ssmSessionWorkerBinaryName)); err != nil {
+		// unexpected, should return err and fail
+		return capabilities
+	} else if !exists {
+		return capabilities
+	}
+
+	const capabilityEcsExecConfigPath = "config"
+	capabilityEcsExecConfigDir := filepath.Join(capabilityEcsExecRootDir, capabilityEcsExecConfigPath)
+	const ssmAgentConfigName = "amazon-ssm-agent.json"
+	if exists, err := fileExists(filepath.Join(capabilityEcsExecConfigDir, ssmAgentConfigName)); err != nil {
+		// unexpected, should return err and fail
+		return capabilities
+	} else if !exists {
+		return capabilities
+	}
+	const ssmAgentLogConfigName = "seelog.xml"
+	if exists, err := fileExists(filepath.Join(capabilityEcsExecConfigDir, ssmAgentLogConfigName)); err != nil {
+		// unexpected, should return err and fail
+		return capabilities
+	} else if !exists {
+		return capabilities
+	}
+
+	const capabilityEcsExecCertsPath = "certs"
+	capabilityEcsExecCertsDir := filepath.Join(capabilityEcsExecRootDir, capabilityEcsExecCertsPath)
+	if exists, err := directoryExists(capabilityEcsExecCertsDir); err != nil {
+		// unexpected, should return err and fail
+		return capabilities
+	} else if !exists {
+		return capabilities
+	}
+
+	return appendNameOnlyAttribute(capabilities, attributePrefix+capabilityEcsExec)
+}
+
+func directoryExists(path string) (bool, error) {
+	if fileInfo, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	} else if !fileInfo.IsDir() {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func fileExists(path string) (bool, error) {
+	if fileInfo, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	} else if fileInfo.IsDir() {
+		return false, nil
+	}
+
+	return true, nil
+}
+
 // getTaskENIPluginVersionAttribute returns the version information of the ECS
 // CNI plugins. It just executes the ENI plugin as the assumption is that these
 // plugins are packaged with the ECS Agent, which means all of the other plugins
@@ -338,5 +422,7 @@ func (agent *ecsAgent) getTaskENIPluginVersionAttribute() (*ecs.Attribute, error
 }
 
 func appendNameOnlyAttribute(attributes []*ecs.Attribute, name string) []*ecs.Attribute {
-	return append(attributes, &ecs.Attribute{Name: aws.String(name)})
+	return append(attributes, &ecs.Attribute{
+		Name: aws.String(name),
+	})
 }
